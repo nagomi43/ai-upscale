@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI動画アップスケール</title>
+<meta name="description" content="ブラウザだけで動画をAIで高画質化（Real-ESRGAN）。動画はどこにも送信されません。">
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #6a7282; --line: #e2e5ea;
+    --accent: #3b5bdb; --accent-text: #ffffff; --drop: #eef2ff; --ok: #2b8a3e; --err: #c92a2a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #14161b; --panel: #1c1f26; --text: #e7e9ee; --muted: #9aa1ae; --line: #2c313b;
+      --accent: #748ffc; --accent-text: #0f1117; --drop: #1f2433; --ok: #69db7c; --err: #ff8787; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.6 system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Yu Gothic UI", Meiryo, sans-serif; }
+  main { max-width: 880px; margin: 0 auto; padding: 28px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: .02em; }
+  .lead { color: var(--muted); margin: 0 0 20px; font-size: 14px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px; margin-bottom: 16px; }
+  #drop { border: 2px dashed var(--accent); background: var(--drop); border-radius: 12px; padding: 36px 16px;
+    text-align: center; cursor: pointer; transition: transform .1s; }
+  #drop.over { transform: scale(1.01); }
+  #drop strong { font-size: 18px; display: block; }
+  #drop span { color: var(--muted); font-size: 13px; }
+  .row { display: flex; gap: 16px; flex-wrap: wrap; align-items: end; }
+  label.f { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); flex: 1 1 200px; }
+  select { font: inherit; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--text); }
+  button { font: inherit; padding: 10px 22px; border-radius: 8px; border: 0; cursor: pointer; background: var(--accent); color: var(--accent-text); font-weight: 600; }
+  button.sub { background: transparent; color: var(--text); border: 1px solid var(--line); font-weight: 400; }
+  button:disabled { opacity: .45; cursor: default; }
+  .info { font-size: 14px; margin-top: 12px; }
+  .info b { font-variant-numeric: tabular-nums; }
+  progress { width: 100%; height: 12px; accent-color: var(--accent); margin-top: 12px; }
+  #status { font-size: 14px; margin-top: 6px; font-variant-numeric: tabular-nums; min-height: 1.6em; }
+  #status.err { color: var(--err); } #status.ok { color: var(--ok); }
+  .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 14px; }
+  .compare figure { margin: 0; }
+  .compare figcaption { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .compare canvas { width: 100%; height: auto; border-radius: 8px; background: #000; display: block; image-rendering: auto; }
+  .note { font-size: 12.5px; color: var(--muted); }
+  .note li { margin: 2px 0; }
+  a { color: var(--accent); }
+  .hidden { display: none !important; }
+  @media (max-width: 560px) { .compare { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>AI動画アップスケール</h1>
+  <p class="lead">動画をAI（Real-ESRGAN）で1080p〜4Kに高画質化します。処理はこのPCのブラウザの中だけで行い、動画はどこにも送信されません。</p>
+
+  <div class="panel">
+    <div id="drop" tabindex="0">
+      <strong>ここに動画をドラッグ＆ドロップ</strong>
+      <span>またはクリックして選択（MP4がおすすめ）</span>
+    </div>
+    <input id="file" type="file" accept="video/*" class="hidden">
+    <div id="fileinfo" class="info hidden"></div>
+  </div>
+
+  <div class="panel">
+    <div class="row">
+      <label class="f">素材
+        <select id="kind">
+          <option value="anime">アニメ・イラスト（速い）</option>
+          <option value="real">実写（約2倍時間がかかる）</option>
+        </select>
+      </label>
+      <label class="f">出力の解像度
+        <select id="res">
+          <option value="1080">1080p（フルHD）</option>
+          <option value="1440">1440p</option>
+          <option value="2160">4K（2160p）</option>
+        </select>
+      </label>
+      <div class="row" style="flex:0 0 auto;gap:8px">
+        <button id="start" disabled>変換スタート</button>
+        <button id="cancel" class="sub hidden">中止</button>
+      </div>
+    </div>
+    <progress id="bar" max="1" value="0" class="hidden"></progress>
+    <div id="status">動画を選ぶと、まず1コマ試して所要時間の目安を出します。</div>
+    <div class="compare hidden" id="compare">
+      <figure><figcaption>元の動画</figcaption><canvas id="before"></canvas></figure>
+      <figure><figcaption>AIアップスケール後</figcaption><canvas id="after"></canvas></figure>
+    </div>
+  </div>
+
+  <ul class="note">
+    <li>Chrome または Edge（パソコン版）で使ってください。グラフィック性能が高いPCほど速くなります。</li>
+    <li>「変換スタート」を押すと保存先を聞かれます。変換中はこのタブを開いたままにしてください。</li>
+    <li>使用モデル: <a href="https://github.com/xinntao/Real-ESRGAN" target="_blank" rel="noopener">Real-ESRGAN</a>（realesr-animevideov3 / realesr-general-x4v3, BSD-3-Clause）</li>
+  </ul>
+</main>
+<script src="vendor/ort.webgpu.min.js"></script>
+<script src="vendor/mp4-muxer.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
