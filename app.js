@@ -24,20 +24,33 @@ function fmtTime(sec) {
 }
 
 // ---------- モデル ----------
+async function gpuHasF16() {
+  try { const a = await navigator.gpu.requestAdapter(); return !!a && a.features.has('shader-f16'); } catch (_) { return false; }
+}
+
 async function getSession(kind) {
   if (state.sessions[kind]) return state.sessions[kind];
-  const url = `models/${kind}-x4.onnx`;
   const forceCpu = new URLSearchParams(location.search).has('cpu');
-  const tries = navigator.gpu && !forceCpu ? [['webgpu'], ['wasm']] : [['wasm']];
+  const tries = [];
+  if (navigator.gpu && !forceCpu) {
+    // 半精度(fp16)に対応したGPUなら、軽い fp16 モデルを使う（約1.5〜2倍速）
+    if (await gpuHasF16()) tries.push(['webgpu', `models/${kind}-x4-fp16.onnx`, 'GPU・高速']);
+    tries.push(['webgpu', `models/${kind}-x4.onnx`, 'GPU']);
+  }
+  tries.push(['wasm', `models/${kind}-x4.onnx`, 'CPU']);
   let lastErr;
-  for (const eps of tries) {
+  for (const [ep, url, label] of tries) {
     try {
-      setStatus(`AIモデルを読み込み中…（${eps[0] === 'webgpu' ? 'GPU' : 'CPU'}）`);
-      const s = await ort.InferenceSession.create(url, { executionProviders: eps, graphOptimizationLevel: 'all' });
+      setStatus(`AIモデルを読み込み中…（${label}）`);
+      const s = await ort.InferenceSession.create(url, { executionProviders: [ep], graphOptimizationLevel: 'all' });
+      // 試しに小さい画像で1回動かし、壊れた結果にならないか確認
+      const t = new ort.Tensor('float32', new Float32Array(3 * 16 * 16).fill(0.5), [1, 3, 16, 16]);
+      const o = (await s.run({ input: t })).output.data;
+      if (!(Math.abs(o[0] - 0.5) < 0.2)) throw new Error('bad output on ' + label);
       state.sessions[kind] = s;
-      state.backend = eps[0];
+      state.backend = label;
       return s;
-    } catch (e) { lastErr = e; console.warn('EP failed', eps, e); }
+    } catch (e) { lastErr = e; console.warn('session failed', label, e); }
   }
   throw lastErr;
 }
@@ -125,12 +138,28 @@ function targetSize() {
 }
 
 let runLock = Promise.resolve();
-async function upscaleCurrentFrame(session) {
+let prevRgba = null;
+const SAME_THRESHOLD = 1.0; // 0〜255 の平均差。これ未満なら同じコマとみなす
+function frameDiff(a, b) {
+  // 全画素を比較。平均の差が小さく、大きく変わった画素がほぼ無いときだけ「同じコマ」
+  let sum = 0, big = 0, cnt = 0;
+  for (let j = 0; j < a.length; j += 4) {
+    const d = Math.abs(a[j] - b[j]) + Math.abs(a[j + 1] - b[j + 1]) + Math.abs(a[j + 2] - b[j + 2]);
+    sum += d; if (d > 36) big++; cnt++;
+  }
+  if (big > 12) return Infinity; // 口パクなど小さな動きも見逃さない
+  return sum / cnt / 3;
+}
+async function upscaleCurrentFrame(session, opts = {}) {
   const { w, h } = state;
   srcCanvas.width = w; srcCanvas.height = h;
   const sctx = srcCanvas.getContext('2d', { willReadFrequently: true });
   sctx.drawImage(state.video, 0, 0, w, h);
   const rgba = sctx.getImageData(0, 0, w, h).data;
+  if (opts.skipSame && prevRgba && prevRgba.length === rgba.length && frameDiff(prevRgba, rgba) < SAME_THRESHOLD) {
+    return null; // 前のコマとほぼ同じ → AI処理を省略して前の結果を使う
+  }
+  prevRgba = rgba;
   const n = w * h;
   const chw = new Float32Array(3 * n);
   for (let i = 0, j = 0; i < n; i++, j += 4) {
@@ -190,7 +219,7 @@ async function speedTest() {
   state.secPerFrame = (performance.now() - t0) / 1000;
   showPreview();
   const est = state.secPerFrame * state.frames * 1.1;
-  const be = state.backend === 'webgpu' ? 'GPU' : 'CPU';
+  const be = state.backend;
   setStatus(`目安: 1コマ ${state.secPerFrame.toFixed(2)}秒（${be}）→ この動画は 約${fmtTime(est)}。下の比較を見て、よければ「変換スタート」。`);
   ui.start.disabled = false;
   } finally { state.testing = false; }
@@ -290,11 +319,15 @@ async function run() {
     const total = state.frames, dt = 1 / state.fps, usPerFrame = 1e6 / state.fps;
     const gop = Math.max(1, Math.round(state.fps * 2));
     const t0 = performance.now();
+    let skipped = 0;
+    prevRgba = null;
     for (let i = 0; i < total; i++) {
       if (state.cancel) throw new Error('中止しました');
       if (encErr) throw encErr;
       await seekTo(state.video, Math.min(i * dt + dt / 2, state.duration - 0.001));
-      const canvas = await upscaleCurrentFrame(session);
+      const res = await upscaleCurrentFrame(session, { skipSame: true });
+      if (res === null) skipped++;
+      const canvas = dstCanvas;
       const frame = new VideoFrame(canvas, { timestamp: Math.round(i * usPerFrame), duration: Math.round(usPerFrame) });
       venc.encode(frame, { keyFrame: i % gop === 0 });
       frame.close();
@@ -303,7 +336,7 @@ async function run() {
       const el = (performance.now() - t0) / 1000, done = i + 1;
       const fps = done / el;
       ui.bar.value = done / total;
-      setStatus(`変換中… ${done} / ${total} コマ（${Math.round((done / total) * 100)}%）　${fps.toFixed(2)} コマ/秒　残り約 ${fmtTime((total - done) / fps)}`);
+      setStatus(`変換中… ${done} / ${total} コマ（${Math.round((done / total) * 100)}%）　${fps.toFixed(2)} コマ/秒　残り約 ${fmtTime((total - done) / fps)}${skipped ? `　（同じコマを ${skipped} 枚スキップ）` : ''}`);
     }
     setStatus('仕上げ中…');
     await venc.flush(); venc.close();
