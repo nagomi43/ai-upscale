@@ -19,6 +19,7 @@ GPUがうまく動かないときは、URLの最後に `?cpu` を付けるとCPU
   - `real-x4.onnx` … realesr-general-x4v3
 - 推論: [ONNX Runtime Web](https://github.com/microsoft/onnxruntime)（WebGPU、半精度対応GPUでは fp16 モデル `*-fp16.onnx`、使えない場合はWASM）
 - 高速化: 前のコマとほぼ同じコマ（アニメの2コマ・3コマ打ちなど）はAI処理を省略して前の結果を使う
+- 超高速モード: [Anime4K-WebGPU](https://github.com/Anime4KWebBoost/Anime4K-WebGPU)（ModeA）。AIより大幅に速いがアニメ向け、WebGPU必須
 - 動画の読み込み: `<video>` 要素で1コマずつ取り出し
 - 書き出し: WebCodecs（H.264、未対応ならVP9）＋ [mp4-muxer](https://github.com/Vanilagy/mp4-muxer)、音声はAAC（未対応ならOpus）で再エンコード
 
@@ -26,3 +27,4 @@ GPUがうまく動かないときは、URLの最後に `?cpu` を付けるとCPU
 - Real-ESRGAN のモデル: BSD-3-Clause（© Xintao Wang）
 - ONNX Runtime Web: MIT（© Microsoft）
 - mp4-muxer: MIT（© Vanilagy）
+- Anime4K-WebGPU: MIT（`vendor/LICENSE-anime4k-webgpu.md`）

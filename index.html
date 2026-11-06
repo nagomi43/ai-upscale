@@ -68,6 +68,7 @@
         <select id="kind">
           <option value="anime">アニメ・イラスト（速い）</option>
           <option value="real">実写（約2倍時間がかかる）</option>
+          <option value="a4k">超高速（Anime4K・アニメ向け・GPU必須）</option>
         </select>
       </label>
       <label class="f">出力の解像度
@@ -93,11 +94,12 @@
   <ul class="note">
     <li>Chrome または Edge（パソコン版）で使ってください。グラフィック性能が高いPCほど速くなります。</li>
     <li>「変換スタート」を押すと保存先を聞かれます。変換中はこのタブを開いたままにしてください。</li>
-    <li>使用モデル: <a href="https://github.com/xinntao/Real-ESRGAN" target="_blank" rel="noopener">Real-ESRGAN</a>（realesr-animevideov3 / realesr-general-x4v3, BSD-3-Clause）</li>
+    <li>使用モデル: <a href="https://github.com/xinntao/Real-ESRGAN" target="_blank" rel="noopener">Real-ESRGAN</a>（realesr-animevideov3 / realesr-general-x4v3, BSD-3-Clause）、超高速モード: <a href="https://github.com/Anime4KWebBoost/Anime4K-WebGPU" target="_blank" rel="noopener">Anime4K-WebGPU</a>（MIT）</li>
   </ul>
 </main>
 <script src="vendor/ort.webgpu.min.js"></script>
 <script src="vendor/mp4-muxer.js"></script>
+<script src="vendor/anime4k-webgpu.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

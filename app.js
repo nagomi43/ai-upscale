@@ -29,6 +29,7 @@ async function gpuHasF16() {
 }
 
 async function getSession(kind) {
+  if (kind === 'a4k') { state.backend = 'GPU・Anime4K'; return { a4k: true }; }
   if (state.sessions[kind]) return state.sessions[kind];
   const forceCpu = new URLSearchParams(location.search).has('cpu');
   const tries = [];
@@ -137,6 +138,76 @@ function targetSize() {
   return { tw, th };
 }
 
+// ---------- 超高速モード（Anime4K / WebGPU） ----------
+let a4k = null;
+const A4K_SHADER = `
+@group(0) @binding(0) var t: texture_2d<f32>;
+@group(0) @binding(1) var s: sampler;
+struct VO { @builtin(position) p: vec4f, @location(0) uv: vec2f };
+@vertex fn vs(@builtin(vertex_index) i: u32) -> VO {
+  var pos = array<vec2f, 3>(vec2f(-1.0, -3.0), vec2f(-1.0, 1.0), vec2f(3.0, 1.0));
+  var o: VO;
+  o.p = vec4f(pos[i], 0.0, 1.0);
+  o.uv = vec2f((pos[i].x + 1.0) * 0.5, (1.0 - pos[i].y) * 0.5);
+  return o;
+}
+@fragment fn fs(v: VO) -> @location(0) vec4f {
+  let c = textureSample(t, s, v.uv);
+  return vec4f(clamp(c.rgb, vec3f(0.0), vec3f(1.0)), 1.0);
+}`;
+
+async function getA4k(tw, th) {
+  const { w, h } = state;
+  const key = `${w}x${h}>${tw}x${th}`;
+  if (a4k && a4k.key === key) return a4k;
+  if (!navigator.gpu) throw new Error('超高速モードはGPU（WebGPU）が必要です。Chrome / Edge の最新版で開いてください');
+  const A = window['anime4k-webgpu'];
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) throw new Error('GPUが見つかりませんでした');
+  const device = a4k?.device || (await adapter.requestDevice());
+  const input = device.createTexture({ size: [w, h, 1], format: 'rgba8unorm',
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+  const preset = new A.ModeA({ device, inputTexture: input,
+    nativeDimensions: { width: w, height: h }, targetDimensions: { width: tw, height: th } });
+  const out = preset.getOutputTexture();
+  const W = out.width, H = out.height;
+  const format = 'rgba8unorm';
+  const rt = device.createTexture({ size: [W, H, 1], format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+  const stride = Math.ceil((W * 4) / 256) * 256;
+  const readBuf = device.createBuffer({ size: stride * H, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const module = device.createShaderModule({ code: A4K_SHADER });
+  const pipe = device.createRenderPipeline({ layout: 'auto',
+    vertex: { module, entryPoint: 'vs' }, fragment: { module, entryPoint: 'fs', targets: [{ format }] },
+    primitive: { topology: 'triangle-list' } });
+  const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+  const bind = device.createBindGroup({ layout: pipe.getBindGroupLayout(0),
+    entries: [{ binding: 0, resource: out.createView() }, { binding: 1, resource: sampler }] });
+  a4k = { key, device, input, preset, rt, readBuf, stride, W, H, pipe, bind };
+  return a4k;
+}
+
+async function runA4k(e, rgba) {
+  const { w, h } = state;
+  e.device.queue.writeTexture({ texture: e.input }, rgba, { bytesPerRow: w * 4, rowsPerImage: h }, [w, h, 1]);
+  const enc = e.device.createCommandEncoder();
+  e.preset.pass(enc);
+  const pass = enc.beginRenderPass({ colorAttachments: [{ view: e.rt.createView(),
+    loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
+  pass.setPipeline(e.pipe); pass.setBindGroup(0, e.bind); pass.draw(3); pass.end();
+  enc.copyTextureToBuffer({ texture: e.rt }, { buffer: e.readBuf, bytesPerRow: e.stride, rowsPerImage: e.H }, [e.W, e.H, 1]);
+  e.device.queue.submit([enc.finish()]);
+  await e.readBuf.mapAsync(GPUMapMode.READ);
+  const src = new Uint8Array(e.readBuf.getMappedRange());
+  upCanvas.width = e.W; upCanvas.height = e.H;
+  const uctx = upCanvas.getContext('2d');
+  const img = uctx.createImageData(e.W, e.H);
+  const rowBytes = e.W * 4;
+  for (let y = 0; y < e.H; y++) img.data.set(src.subarray(y * e.stride, y * e.stride + rowBytes), y * rowBytes);
+  e.readBuf.unmap();
+  uctx.putImageData(img, 0, 0);
+  return upCanvas;
+}
+
 let runLock = Promise.resolve();
 let prevRgba = null;
 const SAME_THRESHOLD = 1.0; // 0〜255 の平均差。これ未満なら同じコマとみなす
@@ -160,6 +231,16 @@ async function upscaleCurrentFrame(session, opts = {}) {
     return null; // 前のコマとほぼ同じ → AI処理を省略して前の結果を使う
   }
   prevRgba = rgba;
+  if (session.a4k) {
+    const { tw, th } = targetSize();
+    const e = await getA4k(tw, th);
+    const c = await runA4k(e, rgba);
+    dstCanvas.width = tw; dstCanvas.height = th;
+    const dctx = dstCanvas.getContext('2d');
+    dctx.imageSmoothingEnabled = true; dctx.imageSmoothingQuality = 'high';
+    dctx.drawImage(c, 0, 0, tw, th);
+    return dstCanvas;
+  }
   const n = w * h;
   const chw = new Float32Array(3 * n);
   for (let i = 0, j = 0; i < n; i++, j += 4) {
